@@ -1,7 +1,7 @@
-from dotenv import load_dotenv
-load_dotenv()
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from datetime import datetime
 import sqlite3
@@ -22,24 +22,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Config ──────────────────────────────────────────────────────────────────
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "2SsUzikG3oXrW4tkaIba4cgTKVpAaJW5")
+# ── Config ───────────────────────────────────────────────────────────────────
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "your_mistral_api_key_here")
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 SMTP_HOST     = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER     = os.getenv("SMTP_USER", "harshalb2907@gmail.com")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "gxuepgbczaovrgxj")
+SMTP_USER     = os.getenv("SMTP_USER", "your_email@gmail.com")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "your_app_password")
 
 BRANCH_EMAILS = {
-    "pune":   "julabandjamun@gmail.com",
-    "nashik": "nashik@brainchecker.com",
-    "thane":  "thane@brainchecker.com",
+    "pune":   os.getenv("EMAIL_PUNE",   "pune@brainchecker.com"),
+    "nashik": os.getenv("EMAIL_NASHIK", "nashik@brainchecker.com"),
+    "thane":  os.getenv("EMAIL_THANE",  "thane@brainchecker.com"),
 }
 
-DB_PATH = "brain_checker.db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH  = os.path.join(BASE_DIR, "brain_checker.db")
+STATIC_DIR = os.path.join(BASE_DIR, "static")
 
-# ── Database ─────────────────────────────────────────────────────────────────
+# ── Database ──────────────────────────────────────────────────────────────────
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -49,7 +51,7 @@ def init_db():
             branch    TEXT    NOT NULL,
             rating    INTEGER NOT NULL,
             message   TEXT    NOT NULL,
-            type      TEXT    NOT NULL,   -- 'complaint' or 'review'
+            type      TEXT    NOT NULL,
             timestamp TEXT    NOT NULL
         )
     """)
@@ -58,7 +60,7 @@ def init_db():
 
 init_db()
 
-def get_last_reviews(branch: str, limit: int = 10) -> list[str]:
+def get_last_reviews(branch: str, limit: int = 10):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
@@ -88,16 +90,14 @@ class SubmitFeedbackRequest(BaseModel):
     branch: str
     rating: int
     message: str
-    type: str   # 'complaint' or 'review'
+    type: str
 
 # ── AI ────────────────────────────────────────────────────────────────────────
 async def generate_ai_review(branch: str, rating: int) -> str:
     past_reviews = get_last_reviews(branch)
-
     past_text = (
         "\n".join(f"- {r}" for r in past_reviews)
-        if past_reviews
-        else "No previous reviews yet."
+        if past_reviews else "No previous reviews yet."
     )
 
     prompt = f"""You are writing a genuine customer review for Brain Checker, a brain training and cognitive assessment center.
@@ -112,7 +112,7 @@ Write a NEW, UNIQUE, AUTHENTIC-sounding customer review that:
 - Is 2–3 sentences long
 - Has a professional yet warm tone
 - Highlights something specific (staff, ambiance, results, technology, etc.)
-- Does NOT start with "I" 
+- Does NOT start with "I"
 - Does NOT sound robotic or templated
 - Is clearly different from the previous reviews above
 
@@ -142,7 +142,7 @@ def send_complaint_email(branch: str, rating: int, complaint: str):
         raise ValueError(f"Unknown branch: {branch}")
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"⚠️ New Complaint – Brain Checker {branch.title()} (Rating: {rating}/5)"
+    msg["Subject"] = f"New Complaint – Brain Checker {branch.title()} (Rating: {rating}/5)"
     msg["From"]    = SMTP_USER
     msg["To"]      = recipient
 
@@ -161,12 +161,8 @@ def send_complaint_email(branch: str, rating: int, complaint: str):
             <td style="padding:8px;font-weight:bold;vertical-align:top;">Complaint</td>
             <td style="padding:8px;">{complaint}</td></tr>
       </table>
-      <p style="margin-top:24px;color:#888;font-size:12px;">
-        Sent automatically by Brain Checker AI Feedback System
-      </p>
     </body></html>
     """
-
     msg.attach(MIMEText(html, "html"))
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -174,13 +170,17 @@ def send_complaint_email(branch: str, rating: int, complaint: str):
         server.login(SMTP_USER, SMTP_PASSWORD)
         server.sendmail(SMTP_USER, recipient, msg.as_string())
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# ── API Routes ────────────────────────────────────────────────────────────────
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "Brain Checker AI Feedback System"}
+
 @app.post("/generate-review")
 async def generate_review(req: GenerateReviewRequest):
     if req.branch.lower() not in BRANCH_EMAILS:
         raise HTTPException(status_code=400, detail="Invalid branch name.")
     if req.rating < 4:
-        raise HTTPException(status_code=400, detail="AI reviews only for ratings ≥ 4.")
+        raise HTTPException(status_code=400, detail="AI reviews only for ratings >= 4.")
     try:
         review = await generate_ai_review(req.branch.lower(), req.rating)
         return {"review": review}
@@ -189,7 +189,6 @@ async def generate_review(req: GenerateReviewRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/submit-feedback")
 async def submit_feedback(req: SubmitFeedbackRequest):
     if req.branch.lower() not in BRANCH_EMAILS:
@@ -197,29 +196,19 @@ async def submit_feedback(req: SubmitFeedbackRequest):
     if req.type not in ("complaint", "review"):
         raise HTTPException(status_code=400, detail="type must be 'complaint' or 'review'.")
 
-    # Save to DB
     save_feedback(req.branch.lower(), req.rating, req.message, req.type)
 
-    # Send email for complaints
     if req.type == "complaint":
         try:
             send_complaint_email(req.branch.lower(), req.rating, req.message)
         except Exception as e:
-            # Don't fail the whole request if email fails; log it
             print(f"[EMAIL ERROR] {e}")
 
     redirect_url = (
         "https://www.google.com/maps/search/Brain+Checker/"
-        if req.type == "review"
-        else None
+        if req.type == "review" else None
     )
-
-    return {
-        "status": "success",
-        "message": "Feedback saved successfully.",
-        "redirect_url": redirect_url,
-    }
-
+    return {"status": "success", "message": "Feedback saved.", "redirect_url": redirect_url}
 
 @app.get("/feedback")
 def list_feedback(branch: Optional[str] = None, limit: int = 50):
@@ -240,7 +229,14 @@ def list_feedback(branch: Optional[str] = None, limit: int = 50):
         for r in rows
     ]
 
+# ── Serve Frontend ────────────────────────────────────────────────────────────
+# This MUST be at the bottom, after all API routes
+if os.path.exists(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": "Brain Checker AI Feedback System"}
+@app.get("/")
+def serve_frontend():
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return {"message": "Frontend not found. Place index.html in backend/static/"}
